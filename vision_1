@@ -1,0 +1,851 @@
+---
+title: "options_trading"
+author: "YANG_HONG"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(include = FALSE)
+library(tidyverse)
+library(quantmod)
+#library(fOptions)
+#library(quantstrat)
+library(ggplot2)
+library(TTR)
+library(openxlsx)
+```
+
+### 获取股票数据
+
+
+
+```{r cars}
+library(Quandl)
+
+ 
+library(quantmod)
+
+library(PerformanceAnalytics)
+
+Quandl.api_key("2p1PKRcv4ysA3M5Cz6hm")
+
+library(Tushare)
+
+library(writexl)
+
+
+STOCK_NAME <- c("AAPL")
+
+Apple <- getSymbols(STOCK_NAME, src = "yahoo",from = Sys.Date() - 365, to = Sys.Date())
+
+
+```
+
+
+判断股票的波动是否剧烈
+
+Beta值反映了股票与市场整体的波动关系。如果Beta值大于1，说明股票的波动性大于市场，波动较剧烈；
+如果Beta值小于1，说明股票波动性小于市场。
+
+
+
+```{r}
+
+
+
+getSymbols("SPY", src = "yahoo", from = Sys.Date() - 365, to = Sys.Date())
+beta_values <- cov(Cl(NVDA), Cl(SPY)) / var(Cl(SPY))
+
+reflection_result <- c(ifelse(beta_values < 1, "波动小", "波动大"))
+
+
+print (paste(
+  "使用SPY（标准普尔500 ETF）作为市场基准和该股票进行对比，beta_values等于" , beta_values 
+      ,  "所判断的结果是" ,   reflection_result, 
+  "这里的波动周期考察的是", 365, "天"))
+
+
+
+```
+
+
+
+
+
+计算未来趋势：
+使用简单移动平均（SMA）或指数移动平均（EMA）来预测未来价格趋势。以下是计算10天和20天的SMA：
+
+SMA: SMA通过计算一定时间段内的平均价格，帮助交易者识别长期趋势。由于其对所有数据点赋予相等权重，SMA能够平滑短期波动，适合用于确认市场的整体趋势
+
+EMA: EMA则对最近的价格变化赋予更高权重，因此能够更快速地反映出价格走势的变化。这使得EMA特别适合短期交易者，能够迅速调整交易策略以捕捉市场动向
+
+
+
+```{r}
+
+# 计算10日和20日简单移动平均
+NVDA$SMA10 <- SMA(Cl(NVDA), n = 10)
+NVDA$SMA20 <- SMA(Cl(NVDA), n = 20)
+
+
+#计算10日和20日指数移动平均
+NVDA$EMA10 <- EMA(Cl(NVDA), n = 10)
+NVDA$EMA20 <- EMA(Cl(NVDA), n = 20)
+
+# 计算14日相对强弱指数（RSI）
+NVDA$RSI9 <- RSI(Cl(NVDA), n = 9)
+
+# 计算MACD，返回值包括MACD线、信号线和直方图
+macd_values <- MACD(Cl(NVDA), nFast = 8, nSlow = 21, nSig = 6) 
+#使用 8 天 EMA 计算快速线，使用 21 天 EMA 计算慢速线。对 MACD 线进行 6 天的 EMA 平滑以生成信号线。
+# 对于 一周左右的持仓周期，可以考虑缩短参数设置，例如：
+# 
+# MACD（6-19-6） 或 MACD（8-21-6）：
+# 快速线（6天EMA或8天EMA）：更贴合一周内的短期波动，能够更快响应价格变化。
+# 慢速线（19天EMA或21天EMA）：保留一定的平滑性，用于判断中期趋势。
+# 信号线（6天EMA）：更短的信号线响应时间快，适合短周期决策。
+
+NVDA$MACD <- macd_values$macd
+NVDA$Signal_MACD <- macd_values$signal
+
+```
+
+
+
+
+绘制趋势图：
+使用ggplot2可视化股价及其移动平均线
+
+
+交叉策略: 交易者常常利用SMA和EMA之间的交叉来生成买入和卖出信号。例如，当短期EMA上穿长期EMA时，通常被视为看涨信号；反之，则为看跌信号。这种交叉策略可以帮助交易者捕捉到潜在的趋势反转145。
+支撑与阻力: 移动平均线还可以作为动态支撑和阻力位。当价格接近移动平均线并发生反弹时，交易者可将其视为买入或卖出的机会
+
+```{r}
+
+ggplot(data = fortify.zoo(NVDA)) +
+  geom_line(aes(x = Index, y = NVDA.Close), color = "blue") +
+  geom_line(aes(x = Index, y = SMA10), color = "red") +
+  geom_line(aes(x = Index, y = SMA20), color = "green") +
+  geom_line(aes(x = Index, y = EMA10), color = "yellow") +
+  geom_line(aes(x = Index, y = EMA20), color = "orange") +
+  labs(title = "NVDA Stock Price with 10 and 20 Day SMA", x = "Date", y = "Price") +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b %Y") +  # Adjusting date intervals
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)
+        )  # Rotating x-axis labels for better readability
+```
+
+
+
+
+
+
+
+
+
+
+生成购买建议：
+根据SMA交叉策略生成购买建议。当短期SMA（例如10天）上穿长期SMA（例如20天）时，发出购买信号；反之则发出卖出信号。
+
+```{r}
+
+NVDA$Signal <- ifelse(NVDA$SMA10 > NVDA$SMA20, "Buy", "Sell")
+NVDA$Signal_EMA <- ifelse(NVDA$EMA10 > NVDA$EMA20, "Buy", "Sell")
+
+tail(NVDA[, c("NVDA.Close", "SMA10", "SMA20", "Signal", 
+              "EMA10", "EMA20", "Signal_EMA")], 15)
+
+```
+
+
+
+
+
+
+
+
+
+```{r}
+
+
+
+# 计算MACD（已假定macd_values变量正确生成）-随机振荡器（%K和%D）
+NVDA$MACD <- macd_values$macd
+NVDA$Signal_MACD <- macd_values$signal
+
+# 获取HLC数据并确保数据格式正确
+HLC_data <- HLC(NVDA)
+
+# 检查并转换为数值型（防止数据类型问题）
+HLC_data[] <- lapply(HLC_data, as.numeric)
+HLC_data[] <- lapply(HLC_data, as.numeric)
+
+HLC_data <- data.frame(
+  High = as.numeric(Hi(NVDA)),
+  Low = as.numeric(Lo(NVDA)),
+  Close = as.numeric(Cl(NVDA))
+)
+
+# 计算随机振荡器（%K和%D）
+stoch_values <- stoch(HLC_data, nFastK = 14, nFastD = 3, nSlowD = 3)
+
+# 将随机振荡器的值添加到NVDA数据框
+NVDA$Stoch_K <- stoch_values[, "fastK"]
+NVDA$Stoch_D <- stoch_values[, "fastD"]
+
+
+```
+
+
+
+```{r}
+(NVDA_df <- data.frame(Date = index(NVDA), 
+                       NVDA_Close = Cl(NVDA),
+                       VOLUMN = NVDA$NVDA.Volume,
+                       SMA10 = NVDA$SMA10, 
+                       SMA20 = NVDA$SMA20,
+                       EMA10 = NVDA$EMA10,
+                       EMA20 = NVDA$EMA20,
+                       RSI9 = NVDA$RSI9, 
+                       MACD = NVDA$MACD,
+                       #Signal = NVDA$Signal,
+                       Signal_MACD = NVDA$Signal_MACD,
+                       Stoch_K = NVDA$Stoch_K, 
+                       Stoch_D = NVDA$Stoch_D))
+
+# 1. RSI14 策略
+# RSI 指标的阈值判断是传统的做法（70/30 规则）。
+# 可能的不足：
+# 短期市场剧烈波动：70 和 30 的阈值可能触发过多信号，尤其在震荡市场中。
+# 个股和时间框架差异：不同股票的 RSI 超买/超卖阈值可能不同，建议进行数据回测以验证是否适合特定股票。
+
+
+STOCK_DF <- NVDA_df %>%
+  mutate(
+    SMA10_20_Signal = case_when(SMA10 > SMA20 ~ "短期上升趋势",  
+                 SMA10 < SMA20 ~ "短期下降趋势",
+                 .default = "其他"),
+    
+    EMA10_20_Signal = case_when(EMA10 > EMA20 ~ "上升,买入看涨",
+                                EMA10 < EMA20 ~ "下降,买入看跌",
+                                .default = ""),
+    
+
+    RSI9_60And40 = case_when(RSI9 >= 60 ~ "市场回调，sell",
+                                   RSI9 <= 40 ~ "市场反弹,Buy",
+                                   .default = "其他"
+                                   ),
+
+    MACD_MACsignal = case_when(MACD > Signal_MACD & MACD > 0 ~ "Buy Call",
+                               MACD < Signal_MACD & MACD < 0 ~ "Buy Sell",
+                               TRUE ~ "Hold"),
+
+
+    Stoch_K_D_Signal = case_when(Stoch_K > 80 & Stoch_D > 80 ~ "买入看涨期权 (Call)", # 超买区域
+                                 Stoch_K < 20 & Stoch_D < 20 ~ "买入看跌期权 (Put)",  # 超卖区域
+                                 Stoch_K > Stoch_D & Stoch_K < 20 ~ "买入看涨期权 (Call)",# 金叉信号（辅助超卖）
+                                 Stoch_K < Stoch_D & Stoch_K > 80 ~ "买入看跌期权 (Put)", # 死叉信号（辅助超买）
+                                 .default = "无交易信号")
+    )
+
+
+
+  
+```
+
+
+
+### 输出stock_df
+
+
+
+```{r}
+write.xlsx(STOCK_DF, "D:/Chrome_download/STOCK_DF.xlsx")
+```
+
+
+
+### SMA10 & SMA20 
+
+
+1. 趋势判断
+使用方法：
+短期 SMA（如 10 日）与长期 SMA（如 50 日）进行交叉。
+当**短期 SMA 上穿长期 SMA（黄金交叉）**，表明标的资产进入上升趋势，可能适合 买入看涨期权（call options）。
+当**短期 SMA 下穿长期 SMA（死亡交叉）**，表明标的资产进入下降趋势，可能适合 买入看跌期权（put options）。
+可以根据标的资产的价格是否高于或低于某条 SMA 来判断当前市场方向。
+期权交易意义：
+如果 SMA 显示趋势向上，可以优先选择看涨期权（call）。
+如果 SMA 显示趋势向下，可以优先选择看跌期权（put）。
+
+2. 支撑和阻力
+使用方法：
+SMA 常被用作动态支撑或阻力位。
+当**价格接近 SMA 时，如果 SMA 是支撑，可以考虑买入看涨期权**。
+如果 SMA 是阻力，可以考虑买入看跌期权。
+期权交易意义：
+当标的资产的价格靠近支撑线时，可以买入短期看涨期权。
+当标的资产的价格接近阻力线时，可以买入短期看跌期权
+
+3. 波动性判断与调整交易策略
+使用方法：
+SMA 可以用来判断价格的波动性：
+如果**价格在 SMA 附近震荡，说明市场处于低波动状态。**这时可以考虑 卖出期权（使用时间价值衰减获利）。
+如果**价格远离 SMA，说明市场波动较大。**这时可以考虑 买入期权（利用波动获利）。
+期权交易意义：
+结合隐含波动率（IV），确认是否适合做多波动性（买期权）或做空波动性（卖期权）。
+
+4. 结合多时间框架分析
+使用方法：
+在不同时间框架上使用 SMA，例如：
+在日线图上使用 50 日 SMA 确定长期趋势。
+在小时图上使用 10 小时 SMA 寻找短期交易机会。
+期权交易意义：
+长短期 SMA 的配合可以帮助你决定期权到期日的选择。
+如果趋势强烈，选择较长到期的期权（如几周或几个月）。
+如果趋势仅是短期波动，选择较短到期的期权（如 1-2 天）。
+
+5. SMA 结合波动率交易
+使用方法：
+当价格突破某条关键 SMA（如 200 日 SMA）时，往往会伴随波动率增加。
+可以买入期权（看涨或看跌），以利用潜在的大幅波动。
+反之，如果价格在 SMA 附近震荡，波动率下降，可以卖出期权以获取时间价值。
+期权交易意义：
+SMA 可以帮助你结合波动率判断是否进入一个高波动或低波动期。
+如果波动率低且价格在 SMA 附近震荡，可以卖出跨式期权（straddle）。
+
+6. 期权组合策略中的应用
+SMA 信号可以用来触发复杂期权组合的构建：
+趋势突破：利用 SMA 判断标的资产趋势上行或下行，选择牛市价差（bull spread）或熊市价差（bear spread）。
+震荡行情：**当价格在 SMA 附近震荡时，可以卖出跨式（straddle）或勒式期权（strangle）**。
+趋势延续：**当价格沿 SMA 持续上行或下行时，可以买入单腿看涨期权（call）或看跌期权（put）**。
+
+```{r}
+
+
+
+ggplot(data = STOCK_DF) +
+  geom_line(aes(x = Date, y = NVDA.Close), color = "black") +
+  geom_line(aes(x = Date, y = SMA10), color = "red") +
+  geom_line(aes(x = Date, y = SMA20), color = "blue") +
+  #geom_line(aes(x = Date, y = SMA), color = "yellow") +
+  
+  labs(title = "NVDA Stock Price with 10, 20 Day SMA and comparasion", x = "Date", y = "Price") +
+  scale_x_date(date_breaks = "20 day", date_labels = "%m-%d") +  # Adjusting date intervals
+  theme(axis.text.x = element_text(angle = 65, hjust = 1)
+        )
+```
+
+
+
+### EMA10 EMA20
+
+EMA（指数移动平均线）对期权的用途
+EMA（Exponential Moving Average）是一种加权移动平均线，赋予**最近价格**更高的权重，
+以**更快速地反映价格变化趋势**。在期权交易中，EMA可以帮助判断市场趋势和潜在的买入/卖出时机，主要用于以下用途：
+
+1. 确定趋势方向
+**上涨趋势**：如果短期 EMA（如 10 天）高于长期 EMA（如 50 天），表明资产处于上涨趋势，可考虑买入看涨期权（Call）。
+
+**下跌趋势**：如果短期 EMA 低于长期 EMA，表明资产处于下跌趋势，可考虑买入看跌期权（Put）。
+
+2. 识别交叉信号
+金叉（Bullish Crossover）： 当**短期 EMA 向上穿越长期 EMA **时，表明可能进入上涨趋势，是买入看涨期权的信号。
+死叉（Bearish Crossover）： 当**短期 EMA 向下穿越长期 EMA **时，表明可能进入下跌趋势，是买入看跌期权的信号。
+
+3. 判断支撑和阻力
+EMA 常被视为动态的支撑或阻力线：
+如果**价格在上涨趋势中触及 EMA**，但未跌破，表明支撑有效。
+如果**价格在下跌趋势中触及 EMA**，但未突破，表明阻力有效。
+
+EMA 的局限性
+
+滞后性：虽然 EMA 比简单移动平均线（SMA）对价格变化反应更快，
+但仍存在一定的滞后性，尤其在快速反转的市场中可能提供延迟信号。
+适用性受时间框架限制：不同时间框架下的 EMA 可能提供相反的信号，需结合交易策略选择合适的参数。
+
+噪音影响：在震荡行情中，EMA 信号可能产生较多误导性交叉信号。
+单独使用局限：EMA 仅考虑价格，不反映市场的波动性、成交量等其他重要因素。
+
+**如何判断和选择 EMA**
+
+1. 参数选择
+短期 EMA（如 10 日或 20 日）： 对价格变化更敏感，适合短线交易。
+长期 EMA（如 50 日或 200 日）： 更平滑，适合捕捉长期趋势。
+
+常用的组合：
+10 日与 50 日 EMA：短期趋势。
+50 日与 200 日 EMA：长期趋势。
+
+2. 信号解读
+
+确保结合其他指标（如 RSI、MACD）以确认信号有效性。
+观察价格是否反复触碰 EMA 来确认趋势的稳定性。
+
+3. 与隐含波动率结合
+如果 EMA 显示上涨趋势且隐含波动率较低，可能是买入看涨期权的机会。
+如果 EMA 显示下跌趋势且隐含波动率较高，可能是买入看跌期权的机会。
+
+```{r}
+ggplot(data = STOCK_DF) +
+  geom_line(aes(x = Date, y = NVDA.Close), color = "black") +
+  geom_line(aes(x = Date, y = EMA10), color = "red") +
+  geom_line(aes(x = Date, y = EMA20), color = "blue") +
+  #geom_line(aes(x = Date, y = SMA10_20_Signal), color = "yellow") +
+  
+  labs(title = "NVDA Stock Price with 10, 20 Day EMA and comparasion", x = "Date", y = "Price") +
+  scale_x_date(date_breaks = "20 day", date_labels = "%m-%d") +  # Adjusting date intervals
+  theme(axis.text.x = element_text(angle = 65, hjust = 1)
+        )
+```
+
+### MACD 和 MACD Signal
+
+MACD（移动平均线收敛/发散指标）在期权交易中，可以用于捕捉趋势方向、市场动量变化以及交易信号。
+以下将从多个角度更详细地阐述其用途及实际应用。    
+
+1. 趋势识别与交易信号
+
+趋势识别
+
+上涨趋势：**当 MACD 线高于信号线**，且两者均高于零线，市场处于强劲上涨趋势。
+策略：适合买入看涨期权 (Call Option)。
+下跌趋势：**当 MACD 线低于信号线**，且两者均低于零线，市场处于明显下跌趋势。
+策略：适合买入看跌期权 (Put Option)。
+
+金叉与死叉
+
+**金叉：MACD 线从下向上穿越信号线，表明市场可能反转向上。**
+策略：买入看涨期权 (Call Option)。
+**死叉：MACD 线从上向下穿越信号线，表明市场可能反转向下。**
+策略：买入看跌期权 (Put Option)。
+
+2. 零线穿越
+
+看涨信号
+当 MACD 线穿越零线由负转正，表明市场动量由负转正，可能进入上涨趋势。
+策略：买入看涨期权。
+
+看跌信号
+当 MACD 线穿越零线由正转负，表明市场动量由正转负，可能进入下跌趋势。
+策略：买入看跌期权。
+
+
+背离分析
+看涨背离
+价格创下新低，但 MACD 并未创新低，表明下跌动能减弱，可能出现价格反弹。
+策略：买入看涨期权。
+
+看跌背离
+价格创下新高，但 MACD 并未创新高，表明上涨动能减弱，可能出现价格回调。
+策略：买入看跌期权。
+
+4. 在期权交易中的应用策略
+单独使用 MACD
+短线交易：使用更小的时间框架（如15分钟图）寻找金叉/死叉信号快速捕捉机会。
+长线交易：在日线图或周线图上确认大趋势后，选择合适的期权。
+
+结合隐含波动率 (IV)
+MACD 表示趋势，而 IV 表示期权价格的隐含风险。
+如果 MACD 看涨且 IV 较低，可以考虑买入看涨期权。
+如果 MACD 看跌且 IV 较低，可以考虑买入看跌期权。
+
+结合支撑与阻力
+在接近重要支撑位时，结合 MACD 的金叉信号买入看涨期权。
+在接近重要阻力位时，结合 MACD 的死叉信号买入看跌期权。
+多时间框架分析
+确认大趋势
+在日线图上确认 MACD 是否显示上涨或下跌趋势。
+
+寻找入场点
+在小时图或更小时间框架中，等待 MACD 的金叉/死叉信号执行交易。
+
+
+
+```{r}
+
+
+# 转换数据为数据框
+# NVDA_df <- data.frame(
+#   Date = index(NVDA),
+#   Close = Cl(NVDA),
+#   MACD = NVDA$MACD,
+#   Signal = NVDA$Signal,
+#   Histogram = NVDA$Histogram,
+#   Signal_Strategy = NVDA$Signal_Strategy
+# )
+
+# 绘制价格和 MACD
+ggplot(STOCK_DF, aes(x = Date)) +
+  #geom_line(aes(y = NVDA.Close, color = "Close Price")) +
+  geom_line(aes(y = MACD, color = "MACD")) +
+  geom_line(aes(y = Signal_MACD, color = "Signal Line")) +
+  #geom_bar(aes(y = , fill = "Histogram"), stat = "identity", alpha = 0.5) +
+  scale_color_manual(values = c("Close Price" = "blue", "MACD" = "red", "Signal Line" = "green")) +
+  labs(title = "NVDA Price Chart with MACD Signals", y = "Price / MACD") +
+  scale_x_date(date_breaks = "20 day", date_labels = "%m-%d")+
+  
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+
+
+
+# a步骤 5: 策略回测
+# 模拟基于 MACD 信号的期权策略，计算潜在收益。
+# 
+# 示例策略逻辑
+# 如果 Signal_Strategy 为 Buy Call，假设买入看涨期权。
+# 如果 Signal_Strategy 为 Buy Put，假设买入看跌期权。
+# R
+# 复制代码
+# # 添加每日收益（假设波动与期权价格成比例）
+# NVDA_df <- NVDA_df %>%
+#   mutate(
+#     Daily_Return = c(NA, diff(Close)),
+#     Option_Profit = case_when(
+#       Signal_Strategy == "Buy Call" ~ pmax(Daily_Return, 0),  # 看涨期权
+#       Signal_Strategy == "Buy Put" ~ pmax(-Daily_Return, 0), # 看跌期权
+#       TRUE ~ 0
+#     )
+#   )
+# 
+# # 计算累计收益
+# NVDA_df <- NVDA_df %>%
+#   mutate(Cumulative_Profit = cumsum(Option_Profit))
+# 
+# # 绘制累计收益
+# ggplot(NVDA_df, aes(x = Date)) +
+#   geom_line(aes(y = Cumulative_Profit, color = "Cumulative Profit")) +
+#   labs(title = "Cumulative Profit from MACD-based Option Strategy", y = "Profit ($)") +
+#   theme_minimal()
+
+        
+```
+
+
+```{r}
+
+(ggplot(STOCK_DF, aes(x = RSI9)) +
+  geom_density(fill = "blue", alpha = 0.4) +
+  geom_vline(xintercept = c(30, 70), linetype = "dashed", color = "red") +
+  labs(title = "RSI Value Distribution", x = "RSI14", y = "Density"))
+
+
+```
+
+
+
+
+
+
+
+
+
+根据上图确定阈值区间
+
+
+
+
+
+```{r}
+
+
+
+# MACD
+# MACD和Signal_MACD: 当MACD线穿越信号线时，可以生成买入或卖出信号。如果MACD在Signal_MACD之上，则可能是买入信号；如果在其下方，则可能是卖出信号。
+
+
+  
+
+
+NVDA_df <- na.omit(NVDA_df)
+
+
+
+glimpse(tail(NVDA_df))
+```
+
+。
+
+
+### 随机振荡器
+Stoch_K 和 Stoch_D: 当%K线穿越%D线时，可以生成交易信号。如果%K线从下向上穿越%D线，则视为买入信号；反之，则视为卖出信号。
+
+
+```{r}
+# 创建价格图与SMA
+(p1 <- ggplot(tail(STOCK_DF, 12)) +
+      geom_line(aes(x = Date, y = NVDA_Close, color = "blue")) +
+      geom_line(aes(x = Date, y = SMA10, color = "red")) +
+      geom_line(aes(x = Date, y = SMA20, color = "green")) +
+      #labs(title = "NVDA Price and Moving Averages", y = "Price") +
+      #scale_color_manual(values=c("blue", "red", "green")) +
+      theme_minimal())
+```
+
+
+
+
+
+```{r}
+(p4 <- ggplot(STOCK_DF, aes(x = Date)) +
+      geom_line(aes(y = Stoch_K, color = "%K")) +
+      geom_line(aes(y = Stoch_D, color = "%D")) +
+      labs(title = "Stochastic Oscillator", y = "Value") +
+      scale_color_manual(values=c("darkgreen", "darkblue")) +
+      theme_minimal())
+
+
+```
+
+
+
+
+```{r}
+# 基于RSI生成信号
+NVDA$Signal_RSI <- ifelse(NVDA$RSI9 > 70, "Sell", ifelse(NVDA$RSI9 < 30, "Buy", "Hold"))
+
+# 基于MACD生成信号
+NVDA$Signal_MACD_Trade <- ifelse(NVDA$MACD > NVDA$Signal_MACD, "Buy", "Sell")
+
+# 基于随机振荡器生成信号
+NVDA$Signal_Stoch <- ifelse(NVDA$Stoch_K > NVDA$Stoch_D, "Buy", "Sell")
+```
+
+含所有指标和信号的最后几行数据
+
+```{r}
+tail(NVDA[, c("NVDA.Close", "SMA10", "SMA20", "EMA10", "EMA20", 
+              "RSI9", "MACD", "Signal_MACD", 
+              "Stoch_K", "Stoch_D", "Signal_RSI", 
+              "Signal_MACD_Trade", "Signal_Stoch")], 15)
+```
+
+
+
+获取期权数据：
+使用getOptionChain()函数获取某个股票的期权链数据。
+
+```{r}
+options_data <- getOptionChain("NVDA")
+```
+
+
+### 使用神经网络预测options的涨跌方向
+
+
+
+
+```{r pressure, echo=FALSE}
+#install.packages(c("nnet", "neuralnet", "caret"))
+#install.packages("tidyquant")
+#install.packages("rvest")
+
+
+
+library(nnet)
+library(neuralnet)
+library(caret)
+
+library(tidyquant)
+library(quantmod)
+library(neuralnet)
+library(caret)
+library(rvest) #抓取网页数据 
+
+# 获取股票的历史数据
+aapl_data <- tq_get("AAPL", from = "2023-01-01", to = today())
+
+# 查看数据
+head(aapl_data)
+
+# 定义目标 URL (Yahoo Finance 的期权数据页面)
+url <- "https://finance.yahoo.com/quote/AAPL/options?p=AAPL"
+
+# 读取网页内容
+page <- read_html(url)
+
+# 提取看涨期权表格
+calls_table <- page %>% html_elements("table") %>% .[1] %>% html_table()
+puts_table <- page %>% html_elements("table") %>% .[2] %>% html_table()
+
+# 查看数据
+head(calls_table)
+head(puts_table)
+```
+
+训练随机森林模型
+
+
+
+
+```{r}
+# 训练随机森林模型
+rf_model <- randomForest(Direction ~ RSI14 + SMA50, 
+                         data = train_data_ramforest, ntree = 10000)
+
+# 预测测试集
+rf_predictions <- predict(rf_model, test_data_ramforest)
+
+# 计算预测准确率
+accuracy <- mean(rf_predictions == test_data_ramforest$Direction)
+
+table(round(rf_predictions,6)) # 查看预测结果的分布
+
+table(test_data_ramforest$Direction)  # 查看真实标签的分布
+
+summary(train_data_ramforest)  # 训练集的摘要
+summary(test_data_ramforest)   # 测试集的摘要
+
+
+table(rf_predictions)
+table(test_data_ramforest$Direction)
+
+rf_predictions <- as.numeric(rf_predictions)  # 如果需要将预测结果转换为因子
+test_data_ramforest$Direction <- as.factor(test_data_ramforest$Direction)  # 同样转换真实标签
+
+rf_predictions <- ifelse(rf_predictions > 0.5, 1, 0)  # 假设概率大于 0.5 预测为 1，否则为 0
+
+
+head(rf_predictions)
+head(test_data_ramforest$Direction)
+
+
+cat("预测准确率: ", accuracy, "\n")
+
+
+
+
+```
+
+
+
+```{r}
+ ROR_t <- function(S_tp0, S_tp1, X, Y, r_t, sigma_t) {
+  (S_tp1 + PutPayoff_tp1(S_tp0, S_tp1, X) - CallPayout_tp1(S_tp0, S_tp1, Y)) / (S_tp0 + Put_t(S_tp0, X, r_t, sigma_t) - Call_t(S_tp0, Y, r_t, sigma_t))
+}
+```
+
+```{r}
+strategy_return <- ROR_t(S_tp0, S_tp1, X, Y, r_t, sigma_t) - 1
+benchmark_return <- (S_tp1 / S_tp0) - 1
+ 
+# create a data.frame with both data and with the dates (monthly basis)
+months <- seq(as.Date("1990-11-1"), by = "month", length = length(S_tp0))
+perf <- data.frame(months, strategy_return, benchmark_return)
+colnames(perf) <- c("months", "Strike-Conversion Strategy", "S&P 100")
+ 
+# create an xts out of the data frame
+perfxts <- xts(perf[ , -1], order.by = perf[ , 1])
+```
+
+### 用蒙特卡洛方法分析
+
+蒙特卡洛模拟是一种基于随机抽样来解决复杂数学问题和进行模拟的数值计算方法。在金融领域，它常用于估算股票价格、风险分析和期权定价等。以下是使用R语言实现蒙特卡洛模拟的
+
+
+```{r}
+# 设置随机数种子以确保结果可复现
+set.seed (123)
+
+# 定义模拟次数
+num_samples <- 10000
+
+# 初始化计数器
+in_circle <- 0
+
+# 进行蒙特卡洛模拟
+for (i in 1:num_samples) {
+  x <- runif(1)
+  y <- runif(1)
+  if (x^2 + y^2 <= 1) {
+    in_circle <- in_circle + 1
+  }
+}
+
+# 计算π的近似值
+pi_estimate <- 4 * in_circle / num_samples
+
+# 输出结果
+value <- cat("π的近似值：", pi_estimate, "\n")
+
+
+# 示例数据框
+option_data <- data.frame (
+  时间点 = c("2023-01", "2023-02", "2023-03", "2023-04"),
+  收益 = c(0.05, -0.02, 0.10, -0.08)
+)
+
+# 创建折线图
+option_plot <- ggplot(option_data, aes(x = 时间点, y = 收益)) +
+  geom_line(color = "blue") +
+  geom_point(color = "red") +
+  labs(title = "期权交易策略收益情况",
+       x = "时间点",
+       y = "收益") +
+  theme_minimal()
+
+# 显示图形
+print(option_plot)
+
+
+# 示例数据框
+strategies_data <- data.frame (
+  策略名称 = c("策略A", "策略B", "策略C"),
+  收益 = c(0.15, -0.05, 0.10)
+)
+
+# 创建条形图
+(strategies_plot <- ggplot(strategies_data, aes(x = 策略名称, y = 收益, fill = 策略名称)) +
+  geom_bar(stat = "identity") +
+  labs(title = "不同期权交易策略的收益对比",
+       x = "策略名称",
+       y = "收益") +
+  scale_fill_manual(values = c("策略A" = "green", "策略B" = "red", "策略C" = "blue")) +
+  theme_minimal())
+
+# 显示图形
+print(strategies_plot)
+
+
+```
+
+### 计算期权隐含波动率（Implied Volatility, IV）
+
+
+```{r}
+install.packages("RQuantLib")
+library(RQuantLib)
+
+
+
+# 设定期权参数
+type <- "call"             # 看涨期权
+value <- 5                 # 期权市场价格
+underlying <- 150          # 当前股价
+strike <- 160              # 行权价
+dividendYield <- 0         # 假设没有股息
+riskFreeRate <- 0.02       # 无风险利率（2%）
+maturity <- 30 / 365       # 到期时间（单位：年，30天）
+volatility <- 0.2          # 初始波动率猜测（20%）
+
+# 计算隐含波动率
+IV <- EuropeanOptionImpliedVolatility(
+  type = type, 
+  value = value, 
+  underlying = underlying, 
+  strike = strike, 
+  dividendYield = dividendYield, 
+  riskFreeRate = riskFreeRate, 
+  maturity = maturity, 
+  volatility = volatility
+)
+
+# 输出计算结果
+IV
+
+
+```
+
+
